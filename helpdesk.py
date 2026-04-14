@@ -14,6 +14,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 import uuid
 from collections import Counter
 from dataclasses import dataclass, field, asdict
@@ -386,11 +387,11 @@ class TicketStore:
         return tickets
 
     def save(self, tickets: List[Ticket]) -> None:
-        """Write the full list of tickets to the JSON file.
+        """Write the full list of tickets to the JSON file atomically.
 
-        The file is written atomically-ish by encoding first and then
-        writing in a single call so a crash mid-write is less likely to
-        leave a half-written file.
+        Writes to a temporary file in the same directory, then uses
+        ``os.replace()`` to atomically swap it over the target path.
+        This prevents data corruption if the process crashes mid-write.
 
         Args:
             tickets: The complete list of tickets to persist.
@@ -401,9 +402,25 @@ class TicketStore:
         data = [t.to_dict() for t in tickets]
         payload = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
 
+        tmp_fd = None
         try:
-            self.path.write_text(payload, encoding="utf-8")
+            tmp_fd = tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                suffix=".tmp",
+                dir=self.path.parent,
+                delete=False,
+            )
+            tmp_fd.write(payload)
+            tmp_fd.close()
+            os.replace(tmp_fd.name, self.path)
         except OSError as exc:
+            # Clean up the temp file on failure
+            if tmp_fd is not None:
+                try:
+                    os.unlink(tmp_fd.name)
+                except OSError:
+                    pass
             print(f"Error: could not write {self.path}: {exc}")
             raise SystemExit(1)
 
@@ -1051,6 +1068,10 @@ def cmd_search(args: argparse.Namespace) -> None:
             if kw in t.title.lower() or kw in t.description.lower()
         ]
 
+    if args.assigned_to:
+        at = args.assigned_to.lower()
+        results = [t for t in results if at in t.assigned_to.lower()]
+
     if not results:
         print("No tickets matched the given filters.")
         return
@@ -1349,7 +1370,10 @@ def cmd_report(args: argparse.Namespace) -> None:
         md("All active tickets are within SLA thresholds.")
     md("")
 
-    report_path = Path(f"report_{today}.md")
+    if args.output:
+        report_path = Path(args.output)
+    else:
+        report_path = store.path.parent / f"report_{today}.md"
     try:
         report_path.write_text("\n".join(md_lines) + "\n", encoding="utf-8")
     except OSError as exc:
@@ -1879,8 +1903,8 @@ def cmd_dashboard(args: argparse.Namespace) -> None:
             """Suppress default access-log noise."""
             pass
 
-    server = HTTPServer(("", port), _Handler)
-    print(f"Dashboard running at http://localhost:{port} — press Ctrl+C to stop")
+    server = HTTPServer(("127.0.0.1", port), _Handler)
+    print(f"Dashboard running at http://127.0.0.1:{port} — press Ctrl+C to stop")
 
     try:
         server.serve_forever()
@@ -2082,7 +2106,7 @@ def _tui_command_bar(width: int) -> str:
     return "  " + "   ".join(commands)
 
 
-def _tui_draw(store: TicketStore, status_msg: str = "") -> None:
+def _tui_draw(store: TicketStore, status_msg: str = "") -> str:
     """Clear the screen and redraw the entire TUI.
 
     Reads tickets fresh from disk so the display always reflects the
@@ -2092,6 +2116,15 @@ def _tui_draw(store: TicketStore, status_msg: str = "") -> None:
         store: The TicketStore to load from.
         status_msg: An optional one-line message shown above the
             command bar (e.g. "Ticket abc123 created.").
+
+    Returns:
+        An empty string on success, or a short error description if
+        drawing failed due to a recoverable issue (e.g. terminal
+        resize).  The caller can display this on the next redraw.
+
+    Raises:
+        BrokenPipeError: If stdout is no longer writable.
+        OSError: If an unrecoverable I/O error occurs on stdout.
     """
     try:
         width = _get_term_width()
@@ -2123,9 +2156,11 @@ def _tui_draw(store: TicketStore, status_msg: str = "") -> None:
 
         sys.stdout.write("\n".join(output) + "\n")
         sys.stdout.flush()
-    except Exception:
-        # Handle resize or broken pipe gracefully
-        pass
+        return ""
+    except (BrokenPipeError, OSError):
+        raise
+    except Exception as exc:
+        return f"Draw error: {type(exc).__name__}: {exc}"
 
 
 def _tui_pause(msg: str = "Press Enter to continue...") -> None:
@@ -2429,8 +2464,8 @@ def cmd_interactive(args: argparse.Namespace) -> None:
 
     while True:
         try:
-            _tui_draw(store, status_msg)
-            status_msg = ""
+            draw_err = _tui_draw(store, status_msg)
+            status_msg = color.red(draw_err) if draw_err else ""
 
             try:
                 cmd = input("\n  > ").strip().lower()
@@ -2464,8 +2499,9 @@ def cmd_interactive(args: argparse.Namespace) -> None:
             print(_CLEAR_SCREEN)
             print("  Goodbye!")
             break
+        except (BrokenPipeError, OSError):
+            break
         except Exception as exc:
-            # Catch resize / broken pipe / unexpected errors
             status_msg = color.red(f"Error: {exc}")
 
 
@@ -2582,6 +2618,7 @@ def cmd_recurring(args: argparse.Namespace) -> None:
         now = datetime.now(timezone.utc)
         created_count = 0
         changed = False
+        tickets = store.load()
 
         for defn in definitions:
             if not defn["active"]:
@@ -2620,9 +2657,7 @@ def cmd_recurring(args: argparse.Namespace) -> None:
             if assigned_to:
                 ticket.log_event("assigned", new_value=assigned_to)
 
-            tickets = store.load()
             tickets.append(ticket)
-            store.save(tickets)
 
             # Advance next_due forward, skipping any missed intervals
             freq = timedelta(days=defn["frequency_days"])
@@ -2641,6 +2676,7 @@ def cmd_recurring(args: argparse.Namespace) -> None:
             )
 
         if changed:
+            store.save(tickets)
             save_recurring(definitions)
 
         if created_count == 0:
@@ -2917,12 +2953,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--keyword",
         help="Search title and description (case-insensitive).",
     )
+    sp_search.add_argument(
+        "--assigned-to",
+        default=None,
+        help="Filter by assigned person or team (case-insensitive).",
+    )
     sp_search.set_defaults(func=cmd_search)
 
     # report
     sp_report = subparsers.add_parser(
         "report",
         help="Print a summary report of all tickets.",
+    )
+    sp_report.add_argument(
+        "--output",
+        default=None,
+        help="Custom output path for the markdown report file.",
     )
     sp_report.set_defaults(func=cmd_report)
 
