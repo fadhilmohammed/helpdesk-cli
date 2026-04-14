@@ -28,7 +28,7 @@ Designed to mirror the core workflows of enterprise ticketing systems like WebTM
 ## Installation
 
 ```bash
-git clone https://github.com/<your-username>/helpdesk-ticket-logger.git
+git clone https://github.com/fadhilmohammed/helpdesk-ticket-logger.git
 cd helpdesk-ticket-logger
 python helpdesk.py --help
 ```
@@ -328,9 +328,21 @@ All ticket data lives in a single `tickets.json` file. This was chosen over SQLi
 - **Human-readable** — open the file and see your data as formatted JSON
 - **Portable** — copy one file to move your entire ticket database
 - **No schema migrations** — new fields use `.get()` with defaults for backward compatibility
-- **Atomic-ish writes** — the entire file is serialized in memory before a single write call
+- **Atomic writes** — data is serialized to a temporary file via `tempfile.NamedTemporaryFile`, then moved into place with `os.replace()`, which is an atomic operation on most filesystems. This ensures a crash mid-write never leaves a corrupted `tickets.json` — the previous version remains intact until the new one is fully written.
 
 Trade-off: this approach reads/writes the full file on every operation, which is fine for the hundreds-to-low-thousands ticket range this tool targets.
+
+### Auto-Assignment Routing
+
+When a ticket is created, the system looks up the ticket's category in `assignment_rules.json` and automatically assigns it to the mapped team (e.g. `"hardware"` routes to `"Hardware Team"`, `"network"` routes to `"Network Admin"`). This can be overridden per-ticket with the `--assign` flag. The routing table is a simple JSON object, making it easy for admins to reconfigure without touching code.
+
+### SLA Compliance Engine
+
+SLA thresholds are defined per priority level (critical: 4h, high: 8h, medium: 24h, low: 72h). The system calculates SLA status by parsing the ticket's `created_at` ISO 8601 timestamp, computing the elapsed `timedelta` against `datetime.now(UTC)`, and comparing it to the threshold. Tickets are classified as `on-track` (under 75% elapsed), `warning` (75%+ elapsed), or `breached` (threshold exceeded). Resolution time for closed tickets is derived from the audit history — specifically, the timestamp of the most recent `status_changed` event where `new_value` is `"closed"` or `"resolved"`.
+
+### Email Notification Simulation
+
+The notification system generates standards-compliant `.eml` files using `email.mime.multipart` and `email.mime.text` from the stdlib. Each notification contains both a plain-text and an HTML body with inline CSS styling, proper `From`/`To`/`Subject`/`Date` headers, and a summary of the ticket state at notification time. Files are saved to `notifications/` and can be opened in any email client for testing. This approach simulates a real notification pipeline without requiring SMTP configuration, making it suitable for development, demos, and portfolio review.
 
 ### File Structure
 
@@ -379,13 +391,11 @@ helpdesk-ticket-logger/
 
 ## Future Improvements
 
-- **SQLite migration** — replace JSON with SQLite for better performance at scale while keeping zero-dependency portability (sqlite3 is in stdlib)
-- **Multi-user support** — role-based access with technician/admin/viewer permissions
-- **REST API** — expose ticket operations over HTTP for integration with other tools
-- **Email sending** — connect to an SMTP server to actually deliver notifications
-- **Slack/Teams webhooks** — real-time alerts to chat platforms
-- **Attachment support** — link files and screenshots to tickets
-- **Kanban board view** — drag-and-drop web UI for visual ticket management
+- **SQLite migration** — replace JSON flat-file storage with SQLite (`sqlite3` is in stdlib) to support concurrent multi-user access, transactional writes, and indexed queries without adding external dependencies
+- **REST API layer** — build a lightweight REST API on top of `http.server` to accept remote ticket submissions, enabling integration with web forms, mobile apps, and third-party automation tools
+- **Role-based access control** — implement user authentication with technician, admin, and viewer roles so that ticket creation, updates, and deletions can be scoped to authorized personnel
+- **Prometheus-compatible metrics endpoint** — expose a `/metrics` endpoint from the dashboard server with ticket counts, SLA compliance rates, and queue depth in Prometheus format for monitoring and alerting integration
+- **Docker containerization** — package the application with a `Dockerfile` for consistent deployment across environments, with volume mounts for persistent data and environment variables for configuration
 
 ## License
 
