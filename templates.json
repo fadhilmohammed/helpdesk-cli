@@ -1,0 +1,27 @@
+{
+  "printer": {
+    "category": "hardware",
+    "priority": "medium",
+    "description": "Printer model: ___ Location: ___ Issue: ___"
+  },
+  "network-outage": {
+    "category": "network",
+    "priority": "critical",
+    "description": "Building: ___ Floor: ___ Affected users: ___"
+  },
+  "software-install": {
+    "category": "software",
+    "priority": "low",
+    "description": "Software name: ___ Version: ___ Machine ID: ___"
+  },
+  "projector": {
+    "category": "av-equipment",
+    "priority": "high",
+    "description": "Room: ___ Issue: ___ Event time: ___"
+  },
+  "account-lockout": {
+    "category": "account",
+    "priority": "high",
+    "description": "Username: ___ Last known access: ___"
+  }
+}

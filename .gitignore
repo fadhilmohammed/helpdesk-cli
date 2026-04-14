@@ -26,3 +26,7 @@ Thumbs.db
 
 # Project data
 tickets.json
+tickets_export.csv
+report_*.md
+recurring.json
+notifications/
